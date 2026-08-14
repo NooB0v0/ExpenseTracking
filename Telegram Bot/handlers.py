@@ -121,7 +121,7 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = await get_group_id_by_chat_id(chat_id)
 
     # 2. Extract participants
-    participants_raw = re.findall(r'[@+]\w+', text)
+    participants_raw = re.findall(r'(?<!\S)[@+]\w+', text)
     if not participants_raw:
         await update.message.reply_text(
             "⚠️ *Missing Names*\n"
@@ -255,7 +255,9 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2. Regex Parsing (Amount parsing removed, relying solely on context.args[0])
     payer_match = re.search(r'\b(?:by|paid by)\s+([@+]\w+)', text, re.IGNORECASE)
-    participants_raw = re.findall(r'[@+]\w+', text)
+    
+    # 🐛 FIX: Added (?<!\S) to prevent capturing attached bot usernames
+    participants_raw = re.findall(r'(?<!\S)[@+]\w+', text)
 
     sender = update.message.from_user
 
@@ -297,7 +299,7 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sender_id = await get_or_create_profile(identifier=sender_identifier, telegram_id=sender_telegram_id)
         payer_id = await get_or_create_profile(identifier=payer_identifier, telegram_id=payer_telegram_id)
 
-        participants_raw = list(dict.fromkeys(re.findall(r'[@+]\w+', text)))
+        participants_raw = list(dict.fromkeys(re.findall(r'(?<!\S)[@+]\w+', text)))
         tasks = [get_or_create_profile(identifier=user) for user in participants_raw]
         tagged_ids = await asyncio.gather(*tasks)
 
@@ -481,7 +483,9 @@ async def settle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2. Regex Parsing
     amount_match = re.search(r'\b\d+(\.\d{1,2})?\b', text)
     payer_match = re.search(r'\b(?:by|paid by)\s+([@+]\w+)', text, re.IGNORECASE)
-    all_tags = re.findall(r'[@+]\w+', text)
+    
+    # 🐛 FIX: Added (?<!\S) to prevent capturing attached bot usernames
+    all_tags = re.findall(r'(?<!\S)[@+]\w+', text)
 
     if not amount_match or not all_tags:
         await update.message.reply_text(
