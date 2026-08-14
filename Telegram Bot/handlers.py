@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 
 # Import our custom tools from our other files!
 from config import supabase, logger
-from database import get_or_create_profile, get_group_id_by_chat_id
+from database import get_or_create_profile, get_group_id_by_chat_id, clear_group_cache
 from utils import require_linked_group, simplify_debts
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -102,8 +102,13 @@ async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display_name = user.username or user.first_name
         await update.message.reply_text(f"👋 Welcome to the group, {display_name}!")
     except Exception as e:
-        # If it's a duplicate key error, they are already in the group
-        await update.message.reply_text("ℹ️ You are already in this group.")
+        # Check for Supabase/PostgreSQL unique constraint violation (Code 23505)
+        error_msg = str(e).lower()
+        if "23505" in error_msg or "duplicate key" in error_msg:
+            await update.message.reply_text("ℹ️ You are already in this group.")
+        else:
+            logger.error(f"System error joining group: {e}")
+            await update.message.reply_text("❌ System Error: Could not join the group.")   
 
 
 @require_linked_group
@@ -142,8 +147,12 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }).execute()
             )
             added_count += 1
-        except Exception:
-            pass # Already a member
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "23505" in error_msg or "duplicate key" in error_msg:
+                pass # Already a member, this is expected
+            else:
+                logger.error(f"System error enrolling user {profile_id}: {e}")
 
     await asyncio.gather(*[enroll_user(pid) for pid in list(dict.fromkeys(new_member_ids))])
 
@@ -194,6 +203,9 @@ async def link_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     "profile_id": caller_profile_id
                 }).execute()
             )
+
+            clear_group_cache(update.effective_chat.id)
+
             await query.edit_message_text(f"🎉 Created and linked new group *{chat_title}*!", parse_mode="Markdown")
 
         elif data.startswith("link_"):
@@ -205,6 +217,9 @@ async def link_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     "telegram_chat_id": chat_id
                 }).eq("id", target_group_id).execute()
             )
+
+            clear_group_cache(update.effective_chat.id)
+
             await query.edit_message_text("🎉 Group linked successfully!", parse_mode="Markdown")
 
     except Exception as e:
@@ -216,7 +231,6 @@ async def link_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /split command with Smart Accountant and Guest support."""
 
-    # --- ADD THIS NEW BLOCK ---
     if not context.args or len(context.args) < 1:
         await update.message.reply_text(
             "⚠️ *Invalid Format*\n"
@@ -227,12 +241,11 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # We strictly force the FIRST argument to be the amount
-        total_amount = float(context.args[0]) 
-    except ValueError:
+        # We strictly force the FIRST argument to be the amount and use Decimal for precise math
+        total_amount = Decimal(context.args[0]) 
+    except Exception: # Catching Exception gracefully handles Decimal conversion errors
         await update.message.reply_text("⚠️ The amount must be a valid number (e.g., 120 or 12.50).")
         return
-    # --------------------------
 
     text = update.message.text
     chat_id = update.effective_chat.id
@@ -240,21 +253,10 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. Check if group is linked
     group_id = await get_group_id_by_chat_id(chat_id)
 
-    # 2. Regex Parsing
-    amount_match = re.search(r'\b\d+(\.\d{1,2})?\b', text)
+    # 2. Regex Parsing (Amount parsing removed, relying solely on context.args[0])
     payer_match = re.search(r'\b(?:by|paid by)\s+([@+]\w+)', text, re.IGNORECASE)
     participants_raw = re.findall(r'[@+]\w+', text)
 
-    if not amount_match:
-        await update.message.reply_text(
-            "⚠️ *Invalid Format*\n"
-            "Please provide a valid amount to split.\n\n"
-            "_Example:_ `/split 120 @joel by @sarah Dinner`", 
-            parse_mode="Markdown"
-        )
-        return
-
-    total_amount = Decimal(amount_match.group(0))
     sender = update.message.from_user
 
     # 3. Determine the Payer AND the Sender
@@ -271,9 +273,21 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payer_telegram_id = sender_telegram_id
 
     # 4. Clean up the Description
+    # Remove the 'by @payer' or 'paid by @payer' phrase
     desc_clean = re.sub(r'\b(?:by|paid by)\s+[@+]\w+', '', text, flags=re.IGNORECASE)
-    desc_raw = re.sub(r'/split|\b\d+(\.\d{1,2})?\b|[@+]\w+', '', desc_clean)
-    description = ' '.join(desc_raw.split()) 
+    
+    # Remove the /split command from the start of the string
+    desc_clean = re.sub(r'^/split\s+', '', desc_clean, flags=re.IGNORECASE)
+    
+    # Remove the exact amount from the front of the remaining string
+    amount_str = context.args[0]
+    desc_clean = re.sub(rf'^{re.escape(amount_str)}\s*', '', desc_clean)
+    
+    # Remove all remaining user tags (@joel, +Guest)
+    desc_raw = re.sub(r'[@+]\w+', '', desc_clean)
+    
+    # Clean up excess whitespace
+    description = ' '.join(desc_raw.split())
     
     if not description:
         description = "Telegram Expense"
@@ -329,8 +343,12 @@ async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "profile_id": profile_id
                     }).execute()
                 )
-            except Exception:
-                pass # Already a member
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "23505" in error_msg or "duplicate key" in error_msg:
+                    pass # Already a member, this is expected
+                else:
+                    logger.error(f"System error in auto-enrollment for {profile_id}: {e}")
                 
         await asyncio.gather(*[enroll_user(pid) for pid in all_participants])
 

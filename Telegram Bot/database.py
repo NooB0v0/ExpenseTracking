@@ -113,3 +113,8 @@ async def get_group_id_by_chat_id(chat_id: int) -> str | None:
         group_cache[chat_id] = group_id  # Add this line!
         return group_id
     return None
+
+def clear_group_cache(chat_id: int):
+    """Removes a chat_id from the cache so the next request fetches fresh from the database."""
+    if chat_id in group_cache:
+        del group_cache[chat_id]
